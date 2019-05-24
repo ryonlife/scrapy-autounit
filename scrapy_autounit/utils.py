@@ -66,13 +66,14 @@ def create_tests_tree(base_path, spider_name, callback_name):
     (base_path / 'tests' / spider_name / callback_name / '__init__.py').touch()
 
 
-def add_sample(index, fixtures_dir, data):
+def add_sample(index, fixtures_dir, data, gen_test=True):
     filename = 'fixture%s.bin' % str(index)
     path = fixtures_dir / filename
     data = compress_data(pickle_data(data))
     with open(path, 'wb') as outfile:
         outfile.write(data)
-    write_test(path)
+    if gen_test:
+        write_test(path)
 
 
 def compress_data(data):
@@ -287,3 +288,60 @@ def test_generator(fixture_path):
             self.assertEqual(fixture_data, _object, 'Not equal!')
 
     return test
+
+
+def decode_data(spider, callback, number):
+    project_dir = get_project_dir()
+    if not project_dir:
+        raise RuntimeError('No active project')
+
+    path = Path(
+        project_dir / 'autounit' / 'fixtures' /
+        spider / callback / f'fixture{number}.bin'
+    )
+    with open(path, 'rb') as f:
+        data = f.read()
+    return unpickle_data(decompress_data(data))
+
+
+def encode_data(
+    spider,
+    callback,
+    number,
+    data=None,
+    request=None,
+    response=None,
+    result=None,
+    spider_args=None,
+    settings=None,
+    middlewares=None
+):
+    project_dir = get_project_dir()
+    if not project_dir:
+        raise RuntimeError('No active project')
+
+    path = Path(
+        project_dir / 'autounit' / 'fixtures' /
+        spider / callback / f'fixture{number}.bin'
+    )
+
+    fixture_data = decode_data(spider, callback, number)
+
+    if data:
+        add_sample(number, path.parent, data, gen_test=False)
+        return
+
+    if request:
+        fixture_data['request'] = request
+    if response:
+        fixture_data['response'] = response
+    if result:
+        fixture_data['result'] = result
+    if spider_args:
+        fixture_data['spider_args'] = spider_args
+    if settings:
+        fixture_data['settings'] = settings
+    if middlewares:
+        fixture_data['middlewares'] = middlewares
+
+    add_sample(number, path.parent, fixture_data, gen_test=False)
