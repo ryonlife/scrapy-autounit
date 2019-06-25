@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name='scrapy-autounit',
-    version='0.0.14',
+    version='0.0.15',
     author='',
     author_email='',
     description='Automatic unit test generation for Scrapy.',
@@ -17,5 +17,8 @@ setuptools.setup(
         'Programming Language :: Python :: 3',
         'License :: OSI Approved :: BSD License',
         'Operating System :: OS Independent',
+    ],
+    install_requires=[
+        'pathlib',
     ],
 )

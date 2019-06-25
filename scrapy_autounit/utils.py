@@ -11,7 +11,7 @@ from scrapy.item import Item
 from scrapy.crawler import Crawler
 from scrapy.exceptions import NotConfigured
 from scrapy.http import HtmlResponse, Request
-from scrapy.utils.reqser import request_to_dict
+from scrapy.utils.reqser import request_to_dict, request_from_dict
 from scrapy.utils.spider import iter_spider_classes
 from scrapy.utils.project import get_project_settings
 from scrapy.utils.misc import walk_modules, load_object, create_instance
@@ -50,34 +50,43 @@ def get_middlewares(spider):
     return mw_paths
 
 
-def get_or_create_fixtures_dir(base_path, spider_name, callback_name):
-    create_tests_tree(base_path, spider_name, callback_name)
-    fixtures_dir = base_path / 'fixtures' / spider_name / callback_name
-    Path.mkdir(fixtures_dir, parents=True, exist_ok=True)
-    return fixtures_dir
+def create_dir(path, parents=False, exist_ok=False):
+    try:
+        Path.mkdir(path, parents=parents)
+    except OSError:
+        if exist_ok:
+            pass
+        else:
+            raise
 
 
-def create_tests_tree(base_path, spider_name, callback_name):
-    tests_dir = base_path / 'tests' / spider_name / callback_name
-    Path.mkdir(tests_dir, parents=True, exist_ok=True)
-    (base_path / '__init__.py').touch()
-    (base_path / 'tests' / '__init__.py').touch()
-    (base_path / 'tests' / spider_name / '__init__.py').touch()
-    (base_path / 'tests' / spider_name / callback_name / '__init__.py').touch()
+def get_or_create_test_dir(base_path, spider_name, callback_name, extra=None):
+    components = [base_path, 'tests', spider_name]
+    if extra:
+        components.append(extra)
+    components.append(callback_name)
+    test_dir = None
+    for component in components:
+        test_dir = test_dir / component if test_dir else component
+        create_dir(test_dir, parents=True, exist_ok=True)
+        (test_dir / '__init__.py').touch()
+    test_name = '__'.join(components[2:])
+    return test_dir, test_name
 
 
-def add_sample(index, fixtures_dir, data, gen_test=True):
-    filename = 'fixture%s.bin' % str(index)
-    path = fixtures_dir / filename
+def add_sample(index, test_dir, test_name, data, gen_test=True):
+    fixture_name = 'fixture%s' % str(index)
+    filename = fixture_name + '.bin'
+    path = test_dir / filename
     data = compress_data(pickle_data(data))
-    with open(path, 'wb') as outfile:
+    with open(str(path), 'wb') as outfile:
         outfile.write(data)
     if gen_test:
         write_test(path)
 
 
 def compress_data(data):
-    return zlib.compress(data, level=9)
+    return zlib.compress(data)
 
 
 def decompress_data(data):
@@ -98,7 +107,8 @@ def response_to_dict(response):
         'status': response.status,
         'body': response.body,
         'headers': response.headers,
-        'flags': response.flags
+        'flags': response.flags,
+        'encoding': response.encoding,
     }
 
 
@@ -133,7 +143,8 @@ def parse_request(request, spider):
 
     _meta = {}
     for key, value in _request.get('meta').items():
-        _meta[key] = parse_object(value, spider)
+        if key != '_autounit':
+            _meta[key] = parse_object(value, spider)
     _request['meta'] = _meta
 
     clean_request(_request, spider.settings)
@@ -170,16 +181,8 @@ def get_valid_identifier(name):
     return re.sub('[^0-9a-zA-Z_]', '_', name.strip())
 
 
-def write_test(fixture_path):
-    fixture_name = fixture_path.stem
-    callback_path = fixture_path.parent
-    spider_path = callback_path.parent
-    base_path = spider_path.parent.parent
-
-    test_path = (
-        base_path / 'tests' / spider_path.name /
-        callback_path.name / f'test_{fixture_name}.py'
-    )
+def write_test(path, test_name, fixture_name):
+    test_path = path / ('test_%s.py' % (fixture_name))
 
     test_code = '''import unittest
 from pathlib import Path
@@ -187,14 +190,10 @@ from scrapy_autounit.utils import test_generator
 
 
 class AutoUnit(unittest.TestCase):
-    def test_{fn_spider_name}_{callback_name}_{fixture_name}(self):
+    def test__{test_name}__{fixture_name}(self):
         self.maxDiff = None
         file_path = (
-            Path(__file__) /
-            '../../../../fixtures' /
-            '{spider_name}' /
-            '{callback_name}' /
-            '{fixture_name}.bin'
+            Path(__file__).parent / '{fixture_name}.bin'
         )
         test = test_generator(file_path.resolve())
         test(self)
@@ -203,24 +202,23 @@ class AutoUnit(unittest.TestCase):
 if __name__ == '__main__':
     unittest.main()
 '''.format(
+        test_name=test_name,
         fixture_name=fixture_name,
-        fn_spider_name=get_valid_identifier(spider_path.name),
-        spider_name=spider_path.name,
-        callback_name=callback_path.name
     )
 
-    with open(test_path, 'w') as f:
+    with open(str(test_path), 'w') as f:
         f.write(test_code)
 
 
 def test_generator(fixture_path):
-    with open(fixture_path, 'rb') as f:
+    with open(str(fixture_path), 'rb') as f:
         data = f.read()
 
     data = unpickle_data(decompress_data(data))
 
-    callback_name = fixture_path.parent.name
-    spider_name = fixture_path.parent.parent.name
+    spider_name = data.get('spider_name')
+    if not spider_name:  # legacy tests
+        spider_name = fixture_path.parent.parent.name
 
     settings = get_project_settings()
 
@@ -230,22 +228,13 @@ def test_generator(fixture_path):
         settings.set(k, v, 50)
     spider = spider_cls(**data.get('spider_args'))
     spider.settings = settings
-    callback = getattr(spider, callback_name, None)
     crawler = Crawler(spider_cls, settings)
 
     def test(self):
         fixture_objects = data['result']
 
-        data['request'].pop('_class', None)
-        data['request'].pop('_encoding', None)
-        data['request'].pop('callback', None)
-
-        request = Request(callback=callback, **data['request'])
-        response = HtmlResponse(
-            encoding='utf-8',
-            request=request,
-            **data['response']
-        )
+        request = request_from_dict(data['request'], spider)
+        response = HtmlResponse(request=request, **data['response'])
 
         middlewares = []
         middleware_paths = data['middlewares']
@@ -267,7 +256,7 @@ def test_generator(fixture_path):
             if hasattr(mw, 'process_spider_input'):
                 mw.process_spider_input(response, spider)
 
-        result = callback(response)
+        result = request.callback(response) or []
         middlewares.reverse()
 
         for mw in middlewares:
